@@ -169,10 +169,35 @@ export async function setupGitHubToken(
 }
 
 export async function logUser() {
-  const user = await getGitHubUser()
-  state.userName = user.login
-  consola.info(`Logged in as ${user.login}`)
+  try {
+    const user = await getGitHubUser()
+    state.userName = user.login
+    consola.info(`Logged in as ${user.login}`)
+  } catch (error) {
+    // Non-fatal: api.github.com may be blocked by enterprise IP allow lists,
+    // but api.githubcopilot.com is reachable from any IP.
+    consola.warn("Skipping GitHub user lookup:", describeTokenError(error))
+  }
 
-  const copilotUser = await getCopilotUsage()
-  state.copilotApiUrl = copilotUser.endpoints.api
+  if (isOpencodeOauthApp()) {
+    // copilotBaseUrl() hardcodes https://api.githubcopilot.com in opencode
+    // mode, so /copilot_internal/user isn't needed to discover the URL.
+    return
+  }
+
+  try {
+    const copilotUser = await getCopilotUsage()
+    state.copilotApiUrl = copilotUser.endpoints.api
+  } catch (error) {
+    // Non-fatal: copilotBaseUrl() falls back to accountType-based URL when
+    // state.copilotApiUrl is unset.
+    consola.warn("Skipping Copilot usage lookup:", describeTokenError(error))
+  }
+}
+
+const describeTokenError = (error: unknown): string => {
+  if (error instanceof HTTPError) {
+    return `${error.message} (HTTP ${error.response.status})`
+  }
+  return error instanceof Error ? error.message : String(error)
 }
