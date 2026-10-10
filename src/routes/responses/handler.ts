@@ -3,6 +3,12 @@ import type { Context } from "hono"
 import { streamSSE } from "hono/streaming"
 
 import {
+  preparePlaintextCollaborationStore,
+  rememberPlaintextCollaborationMessages,
+  restorePlaintextCollaborationMessages,
+} from "~/lib/collaboration-message-store"
+
+import {
   isCopilotResponsesCompatibilityEnabled,
   isResponsesApiWebSearchEnabled as isConfiguredResponsesApiWebSearchEnabled,
   resolveMappedModel,
@@ -60,6 +66,9 @@ export const responsesHandlerDependencies = {
   createResponses: createCopilotResponses,
   findEndpointModel,
   isCopilotResponsesCompatibilityEnabled,
+  preparePlaintextCollaborationStore,
+  rememberPlaintextCollaborationMessages,
+  restorePlaintextCollaborationMessages,
   isResponsesApiWebSearchEnabled: isConfiguredResponsesApiWebSearchEnabled,
   resolveMappedModel,
 }
@@ -216,8 +225,15 @@ export const handleResponses = async (c: Context) => {
     responsesHandlerDependencies.isCopilotResponsesCompatibilityEnabled(
       payload.model,
     )
+  if (useCompatibility) {
+    await responsesHandlerDependencies.restorePlaintextCollaborationMessages(
+      payload,
+    )
+  }
   const collaboration =
     useCompatibility ? createCollaborationCompatibility(payload) : undefined
+  if (collaboration)
+    await responsesHandlerDependencies.preparePlaintextCollaborationStore()
   const upstreamPayload = collaboration?.payload ?? payload
   const upstreamAbort = useCompatibility ? new AbortController() : undefined
 
@@ -293,6 +309,11 @@ export const handleResponses = async (c: Context) => {
         }) {
           debugJson(logger, "Responses stream chunk:", chunk)
           captureUsage(chunk)
+          if (collaboration) {
+            await responsesHandlerDependencies.rememberPlaintextCollaborationMessages(
+              collaboration.plaintextMessages(parseResponsesStreamEvent(chunk)),
+            )
+          }
           const restored = collaboration?.restoreChunk(chunk) ?? chunk
 
           const processedData = fixStreamIds(
@@ -322,6 +343,11 @@ export const handleResponses = async (c: Context) => {
     value: response,
     tailLength: 400,
   })
+  if (collaboration) {
+    await responsesHandlerDependencies.rememberPlaintextCollaborationMessages(
+      collaboration.plaintextMessages(response),
+    )
+  }
   const result =
     collaboration?.restoreResponse(response as ResponsesResult)
     ?? (response as ResponsesResult)

@@ -94,6 +94,9 @@ const createMessagesResponse = (
 
 const { state } = await import("~/lib/state")
 const { closeUsageStore } = await import("~/lib/token-usage")
+const { closePlaintextCollaborationStore } = await import(
+  "~/lib/collaboration-message-store"
+)
 const { tokenUsageRoute } = await import("~/routes/token-usage/route")
 const { responsesHandlerDependencies } = await import(
   "~/routes/responses/handler"
@@ -145,6 +148,7 @@ async function* streamChunks(items: Array<Record<string, unknown>>) {
 beforeEach(async () => {
   process.env[DB_PATH_ENV] = ":memory:"
   await closeUsageStore()
+  await closePlaintextCollaborationStore()
 
   state.copilotToken = "test-token"
   state.accountType = "individual"
@@ -188,6 +192,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await closeUsageStore()
+  await closePlaintextCollaborationStore()
   Reflect.deleteProperty(process.env, DB_PATH_ENV)
 
   state.copilotToken = originalState.copilotToken
@@ -2331,6 +2336,108 @@ describe("native Copilot Responses compatibility", () => {
     expect(declarations[0].tools[0].parameters.properties.message).toEqual({
       type: "string",
     })
+  })
+
+  test("persists plaintext before delivering a tool call, then corrects Codex's child-message label", async () => {
+    let releaseParent!: () => void
+    const parentMayFinish = new Promise<void>((resolve) => {
+      releaseParent = resolve
+    })
+    createResponses.mockImplementationOnce((payload) =>
+      Promise.resolve(
+        (async function* () {
+          await Promise.resolve()
+          yield sse("response.created", {
+            response: createResponsesResult(payload.model),
+          })
+          yield sse("response.output_item.added", {
+            output_index: 0,
+            item: { ...functionCall("copilot_collaboration"), arguments: "" },
+          })
+          yield sse("response.output_item.done", {
+            output_index: 0,
+            item: functionCall("copilot_collaboration"),
+          })
+          await parentMayFinish
+          yield sse("response.completed", {
+            response: {
+              ...createResponsesResult(payload.model),
+              output: [functionCall("copilot_collaboration")],
+            },
+          })
+        })(),
+      ),
+    )
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+    const parentResponse = await post({
+      tools: tools(),
+      stream: true,
+      input: [],
+    })
+    const reader = parentResponse.body!.getReader()
+    const decoder = new TextDecoder()
+    let text = ""
+    while (!text.includes("response.output_item.done")) {
+      const part = await reader.read()
+      if (part.done) throw new Error("Parent stream ended before its tool call")
+      const value: unknown = part.value
+      if (!(value instanceof Uint8Array))
+        throw new Error("Expected an SSE byte chunk")
+      text += decoder.decode(value, { stream: true })
+    }
+    const message = (JSON.parse(callArguments) as { message: string }).message
+    try {
+      const childResponse = await post({
+        input: [
+          {
+            type: "agent_message",
+            author: "/root",
+            recipient: "/root/child",
+            content: [
+              { type: "input_text", text: "Payload:\n" },
+              { type: "encrypted_content", encrypted_content: message },
+              {
+                type: "encrypted_content",
+                encrypted_content: "unknown-legacy-ciphertext",
+              },
+            ],
+          },
+        ],
+      })
+      expect(childResponse.status).toBe(200)
+      await childResponse.text()
+      expect(createResponses.mock.calls[1][0].input).toEqual([
+        {
+          type: "agent_message",
+          author: "/root",
+          recipient: "/root/child",
+          content: [
+            { type: "input_text", text: "Payload:\n" },
+            { type: "input_text", text: message },
+            {
+              type: "encrypted_content",
+              encrypted_content: "unknown-legacy-ciphertext",
+            },
+          ],
+        },
+      ])
+    } finally {
+      releaseParent()
+      while (!(await reader.read()).done) {
+        /* Drain the parent response. */
+      }
+    }
+  })
+
+  test("checks durable message storage before starting an upstream tool-capable request", async () => {
+    responsesHandlerDependencies.preparePlaintextCollaborationStore = () =>
+      Promise.reject(new Error("Tracking store unavailable"))
+    const response = await post({ tools: tools(), stream: true, input: [] })
+    expect(response.status).toBe(500)
+    expect(createResponses).not.toHaveBeenCalled()
+    await response.text()
   })
 
   test.each(["http", "websocket"] as const)(

@@ -18,6 +18,10 @@ The adapter forwards these tools under an ordinary namespace, removes the encryp
 
 Tool definitions in both `tools` and Responses Lite `input.additional_tools` are supported, along with replayed calls, discovered tool definitions, and explicit tool choices. Namespace selection avoids collisions with other declared or replayed tools. Arguments, call IDs, user text, reasoning ciphertext, and other tool namespaces are not rewritten.
 
+Codex v2 still labels these delegated strings as `encrypted_content` in a child's `agent_message`. Before delivering a completed collaboration call, the gateway records SHA-256 hashes of its plain-text message arguments in the existing SQLite database (`COPILOT_API_SQLITE_DB_PATH`, or `copilot-api.sqlite` in the data directory). When a subsequent agent message matches one of these hashes, the gateway changes that content part to `input_text` and preserves the exact string. It does not guess from the appearance of the text and does not store message bodies in this table.
+
+Preserve this SQLite metadata along with the gateway's data when restarting or migrating it. Sessions must return to an instance with the metadata, or use a shared data store. Enable the mode for each model used by the affected parent and child threads. Storage is initialized before starting a request that can emit compatibility tool calls, and hashes are persisted before completed arguments/calls are delivered to the client.
+
 This does not decrypt existing conversation content. Opaque history is retained unchanged; a session or child thread with unreadable encrypted messages may still require explicit recovery. Do not treat a successful replay as proof that an old encrypted message has been recovered.
 
 ## Early invalid-request errors

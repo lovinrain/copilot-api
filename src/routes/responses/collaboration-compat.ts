@@ -19,6 +19,7 @@ export interface CollaborationCompatibility {
   namespace: string
   restoreResponse: <T>(response: T) => T
   restoreChunk: <T extends StreamChunk>(chunk: T) => T
+  plaintextMessages: (responseOrEvent: unknown) => Array<string>
 }
 
 // Native collaboration schemas are reserved upstream: changing only their
@@ -60,10 +61,84 @@ export function createCollaborationCompatibility(
 
   const adapted = structuredClone(payload)
   rewriteRecord(adapted, CLIENT_NAMESPACE, namespace, annotations, false)
+  const knownItems = new Map<string | number, string>()
+  const remembered = new Set<string>()
+
+  const plaintextMessages = (value: unknown): Array<string> => {
+    const messages: Array<string> = []
+    const visit = (record: unknown): void => {
+      if (!isRecord(record)) return
+      const name =
+        typeof record.name === "string" ?
+          record.name.slice(record.name.lastIndexOf(".") + 1)
+        : undefined
+      const isMessageCall =
+        isToolReference(record, namespace)
+        && name !== undefined
+        && MESSAGE_TOOLS.has(name)
+      if (
+        record.type === "function_call"
+        && isMessageCall
+        && typeof record.id === "string"
+      ) {
+        knownItems.set(record.id, name)
+      }
+      if (
+        record.type === "response.output_item.added"
+        && isRecord(record.item)
+        && record.item.type === "function_call"
+      ) {
+        const itemName =
+          typeof record.item.name === "string" ?
+            record.item.name.slice(record.item.name.lastIndexOf(".") + 1)
+          : undefined
+        if (
+          isToolReference(record.item, namespace)
+          && itemName
+          && MESSAGE_TOOLS.has(itemName)
+          && typeof record.output_index === "number"
+        ) {
+          knownItems.set(record.output_index, itemName)
+        }
+      }
+      const knownName =
+        (typeof record.item_id === "string" ?
+          knownItems.get(record.item_id)
+        : undefined)
+        ?? (typeof record.output_index === "number" ?
+          knownItems.get(record.output_index)
+        : undefined)
+      const hasExplicitNamespace =
+        typeof record.namespace === "string"
+        || (typeof record.name === "string" && record.name.includes("."))
+      const knownArgumentEvent =
+        record.type === "response.function_call_arguments.done"
+        && (isMessageCall
+          || (!hasExplicitNamespace
+            && knownName !== undefined
+            && (record.name === undefined || record.name === knownName)))
+      if (
+        (record.type === "function_call" && isMessageCall)
+        || knownArgumentEvent
+      ) {
+        const message = readMessageArgument(record.arguments)
+        if (message !== undefined && !remembered.has(message)) {
+          remembered.add(message)
+          messages.push(message)
+        }
+      }
+      for (const nested of [record.item, record.response]) visit(nested)
+      if (Array.isArray(record.output))
+        for (const item of record.output) visit(item)
+    }
+    visit(value)
+    return messages
+  }
 
   return {
     payload: adapted,
     namespace,
+    plaintextMessages,
     restoreResponse: <T>(response: T): T => {
       if (!isRecord(response)) return response
       const restored = structuredClone(response)
@@ -95,6 +170,18 @@ export function createCollaborationCompatibility(
       }
       return { ...chunk, data: JSON.stringify(event) }
     },
+  }
+}
+
+function readMessageArgument(argumentsValue: unknown): string | undefined {
+  if (typeof argumentsValue !== "string") return undefined
+  try {
+    const args: unknown = JSON.parse(argumentsValue)
+    return isRecord(args) && typeof args.message === "string" ?
+        args.message
+      : undefined
+  } catch {
+    return undefined
   }
 }
 

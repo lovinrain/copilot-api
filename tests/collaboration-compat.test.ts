@@ -86,6 +86,136 @@ function prepare(payload = request()) {
 }
 
 describe("Copilot collaboration compatibility", () => {
+  test("identifies only newly emitted plaintext message arguments, never replayed input", () => {
+    const adapter = prepare()
+    const expected = JSON.parse(call().arguments) as { message: string }
+    expect(adapter.plaintextMessages(adapter.payload)).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        output: [
+          call("other"),
+          { ...call(adapter.namespace), name: "wait_agent" },
+        ],
+      }),
+    ).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        response: { output: [call(adapter.namespace)] },
+      }),
+    ).toEqual([expected.message])
+    expect(
+      adapter.plaintextMessages({ output: [call(adapter.namespace)] }),
+    ).toEqual([])
+  })
+
+  test("tracks interleaved call IDs before argument-done events are forwarded", () => {
+    const adapter = prepare()
+    const first = { ...call(adapter.namespace), arguments: "" }
+    const second = { ...first, id: "fc_2", name: "send_message" }
+    expect(
+      adapter.plaintextMessages({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: first,
+      }),
+    ).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.output_item.added",
+        output_index: 1,
+        item: second,
+      }),
+    ).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.function_call_arguments.done",
+        item_id: "fc_1",
+        namespace: "other",
+        name: "spawn_agent",
+        arguments: '{"message":"not ours"}',
+      }),
+    ).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.function_call_arguments.done",
+        item_id: "fc_1",
+        name: "other_tool",
+        arguments: '{"message":"not ours"}',
+      }),
+    ).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.function_call_arguments.done",
+        item_id: "fc_2",
+        name: "send_message",
+        arguments: '{"message":"second"}',
+      }),
+    ).toEqual(["second"])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.function_call_arguments.done",
+        output_index: 0,
+        name: "spawn_agent",
+        arguments: '{"message":"first"}',
+      }),
+    ).toEqual(["first"])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.function_call_arguments.done",
+        name: `${adapter.namespace}.followup_task`,
+        arguments: '{"message":"followup"}',
+      }),
+    ).toEqual(["followup"])
+  })
+
+  test("ignores incomplete, malformed, and unrelated argument carriers", () => {
+    const adapter = prepare()
+    for (const args of [
+      undefined,
+      "",
+      "{",
+      "null",
+      "[]",
+      '{"message":12}',
+      "{}",
+    ]) {
+      expect(
+        adapter.plaintextMessages({
+          ...call(adapter.namespace),
+          arguments: args,
+        }),
+      ).toEqual([])
+    }
+    expect(adapter.plaintextMessages(null)).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.function_call_arguments.done",
+        name: "spawn_agent",
+        item_id: "unknown",
+        arguments: '{"message":"unknown"}',
+      }),
+    ).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          type: "custom_tool_call",
+          namespace: adapter.namespace,
+          name: "spawn_agent",
+          id: "custom",
+        },
+      }),
+    ).toEqual([])
+    expect(
+      adapter.plaintextMessages({
+        type: "response.function_call_arguments.done",
+        output_index: 0,
+        arguments: '{"message":"unknown"}',
+      }),
+    ).toEqual([])
+  })
+
   test("is a no-op without collaboration definitions", () => {
     for (const payload of [
       { model: "gpt-test" },
