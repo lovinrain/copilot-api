@@ -24,6 +24,9 @@ export interface AppConfig {
   >
   useMessagesApi?: boolean
   useResponsesApiWebSocket?: boolean
+  // Opt-in native Copilot Responses compatibility: plain-text collaboration
+  // tools and preservation of early invalid-request errors. Exact model IDs.
+  copilotResponsesCompatibilityModels?: Array<string>
   upstreamTransport?: UpstreamTransportConfig
   anthropicApiKey?: string
   useResponsesApiWebSearch?: boolean
@@ -157,6 +160,7 @@ export const defaultConfig: AppConfig = {
   modelResponsesApiCompactThresholds,
   useMessagesApi: true,
   useResponsesApiWebSocket: true,
+  copilotResponsesCompatibilityModels: [],
   upstreamTransport: defaultUpstreamTransportConfig,
   useResponsesApiWebSearch: true,
   alphaSearchCodexPriority: true,
@@ -498,6 +502,16 @@ export function isMessagesApiEnabled(): boolean {
 export function isResponsesApiWebSocketEnabled(): boolean {
   const config = getConfig()
   return config.useResponsesApiWebSocket ?? true
+}
+
+export function isCopilotResponsesCompatibilityEnabled(model: string): boolean {
+  const models = getConfig().copilotResponsesCompatibilityModels
+  return (
+    Array.isArray(models)
+    && models.some(
+      (candidate) => typeof candidate === "string" && candidate === model,
+    )
+  )
 }
 
 // Applies to every upstream HTTP transport (Copilot Chat Completions and

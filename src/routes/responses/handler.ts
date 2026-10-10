@@ -3,6 +3,7 @@ import type { Context } from "hono"
 import { streamSSE } from "hono/streaming"
 
 import {
+  isCopilotResponsesCompatibilityEnabled,
   isResponsesApiWebSearchEnabled as isConfiguredResponsesApiWebSearchEnabled,
   resolveMappedModel,
 } from "~/lib/config"
@@ -36,6 +37,8 @@ import type {
 import { createResponses as createCopilotResponses } from "~/services/copilot/create-responses"
 
 import { handleResponsesViaMessages } from "./messages-handler"
+import { createCollaborationCompatibility } from "./collaboration-compat"
+import { preflightResponseStream } from "./early-response-error"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import { getCodexTaskTitleModel } from "./task-title"
 import {
@@ -56,6 +59,7 @@ const logger = createHandlerLogger("responses-handler")
 export const responsesHandlerDependencies = {
   createResponses: createCopilotResponses,
   findEndpointModel,
+  isCopilotResponsesCompatibilityEnabled,
   isResponsesApiWebSearchEnabled: isConfiguredResponsesApiWebSearchEnabled,
   resolveMappedModel,
 }
@@ -208,51 +212,92 @@ export const handleResponses = async (c: Context) => {
     compactInputByLatestCompaction(payload)
   }
 
-  debugJson(logger, "Translated Responses payload:", payload)
+  const useCompatibility =
+    responsesHandlerDependencies.isCopilotResponsesCompatibilityEnabled(
+      payload.model,
+    )
+  const collaboration =
+    useCompatibility ? createCollaborationCompatibility(payload) : undefined
+  const upstreamPayload = collaboration?.payload ?? payload
+  const upstreamAbort = useCompatibility ? new AbortController() : undefined
+
+  debugJson(logger, "Translated Responses payload:", upstreamPayload)
 
   const { vision, initiator: inferredInitiator } =
     getResponsesRequestOptions(payload)
   const initiator = subagentMarker ? "agent" : inferredInitiator
 
-  const response = await responsesHandlerDependencies.createResponses(payload, {
-    vision,
-    initiator,
-    subagentMarker,
-    requestId,
-    sessionId: fallbackSessionId,
-    clientSignal: c.req.raw.signal,
-    transport: responsesTransport,
-  })
+  const response = await responsesHandlerDependencies.createResponses(
+    upstreamPayload,
+    {
+      vision,
+      initiator,
+      subagentMarker,
+      requestId,
+      sessionId: fallbackSessionId,
+      clientSignal:
+        upstreamAbort ?
+          AbortSignal.any([c.req.raw.signal, upstreamAbort.signal])
+        : c.req.raw.signal,
+      transport: responsesTransport,
+    },
+  )
 
-  if (isStreamingRequested(payload) && isAsyncIterable(response)) {
+  if (
+    isStreamingRequested(payload)
+    && isAsyncIterable<{ data?: string; event?: string; id?: string }>(response)
+  ) {
     logger.debug("Forwarding native Responses stream")
+    let usage: UsageTokens = {}
+    const captureUsage = (chunk: unknown): void => {
+      const event = parseResponsesStreamEvent(chunk)
+      if (
+        event?.type === "response.completed"
+        || event?.type === "response.failed"
+        || event?.type === "response.incomplete"
+      ) {
+        usage = {
+          ...normalizeResponsesUsage(event.response?.usage),
+          total_nano_aiu: normalizeOptionalToken(
+            event.copilot_usage?.total_nano_aiu,
+          ),
+        }
+      }
+    }
+    const prepared =
+      useCompatibility ?
+        await preflightResponseStream(response, {
+          signal: c.req.raw.signal,
+        }).catch((error: unknown) => {
+          upstreamAbort?.abort()
+          throw error
+        })
+      : undefined
+
+    if (prepared?.error) {
+      for (const chunk of prepared.buffered) captureUsage(chunk)
+      upstreamAbort?.abort()
+      await prepared.close().catch(() => {})
+      recordUsage(usage)
+      return c.json({ error: prepared.error }, 400)
+    }
+
     return streamSSE(c, async (stream) => {
       const idTracker = createStreamIdTracker()
-      let usage: UsageTokens = {}
-      const iterator = response[Symbol.asyncIterator]()
+      const iterator = (prepared?.stream ?? response)[Symbol.asyncIterator]()
+      if (upstreamAbort) stream.onAbort(() => upstreamAbort.abort())
 
       try {
         for await (const chunk of {
           [Symbol.asyncIterator]: () => iterator,
         }) {
           debugJson(logger, "Responses stream chunk:", chunk)
-          const parsedEvent = parseResponsesStreamEvent(chunk)
-          if (
-            parsedEvent?.type === "response.completed"
-            || parsedEvent?.type === "response.failed"
-            || parsedEvent?.type === "response.incomplete"
-          ) {
-            usage = {
-              ...normalizeResponsesUsage(parsedEvent.response.usage),
-              total_nano_aiu: normalizeOptionalToken(
-                parsedEvent.copilot_usage?.total_nano_aiu,
-              ),
-            }
-          }
+          captureUsage(chunk)
+          const restored = collaboration?.restoreChunk(chunk) ?? chunk
 
           const processedData = fixStreamIds(
-            (chunk as { data?: string }).data ?? "",
-            (chunk as { event?: string }).event,
+            restored.data ?? "",
+            restored.event,
             idTracker,
           )
 
@@ -263,8 +308,12 @@ export const handleResponses = async (c: Context) => {
           })
         }
       } finally {
-        await iterator.return?.()
-        recordUsage(usage)
+        upstreamAbort?.abort()
+        try {
+          await iterator.return?.()
+        } finally {
+          recordUsage(usage)
+        }
       }
     })
   }
@@ -273,7 +322,9 @@ export const handleResponses = async (c: Context) => {
     value: response,
     tailLength: 400,
   })
-  const result = response as ResponsesResult
+  const result =
+    collaboration?.restoreResponse(response as ResponsesResult)
+    ?? (response as ResponsesResult)
   recordUsage({
     ...normalizeResponsesUsage(result.usage),
     total_nano_aiu: normalizeOptionalToken(
