@@ -1,5 +1,7 @@
 # Copilot API
 
+**Codex 兼容性分支：** `codex-compat` 分支持续维护 Copilot 子代理和会话恢复补丁。源码安装、按模型启用配置、CI 和已部署的 v2.6.20 回移版本见[分支维护说明](FORK_MAINTENANCE.md)。下方的 npm 快速开始安装的是上游版本。
+
 <p align="center">
   <img src="docs/hero/copilot-api-hero.svg" alt="Copilot API - Universal AI Gateway" width="1600" />
 </p>

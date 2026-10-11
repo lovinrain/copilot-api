@@ -1,6 +1,6 @@
 # Copilot collaboration compatibility
 
-`copilotResponsesCompatibilityModels` opts exact model IDs into a compatibility mode on the native Copilot `/v1/responses` route. It defaults to an empty list. Provider aliases, the built-in Codex provider, and Messages/Chat routes do not use this mode.
+`copilotResponsesCompatibilityModels` opts exact resolved model IDs into a compatibility mode on the native Copilot `/v1/responses` route, after model mapping. It defaults to an empty list. Provider aliases, the built-in Codex provider, and Messages/Chat routes do not use this mode. See the [fork maintenance guide](../../../FORK_MAINTENANCE.md) for the maintained branch, source builds, and update procedure.
 
 ```json
 {
@@ -8,7 +8,7 @@
 }
 ```
 
-Restart the server after editing the configuration file. Remove the model from the list to disable the mode. No model wildcard matching is performed.
+Restart the server after editing the configuration file. Remove the model from the list to disable the mode. No model wildcard matching is performed. Disabling the mode does not migrate messages already generated through it; those sessions may still require compatibility and its metadata to resume.
 
 ## Collaboration tools
 
@@ -20,7 +20,7 @@ Tool definitions in both `tools` and Responses Lite `input.additional_tools` are
 
 Codex v2 still labels these delegated strings as `encrypted_content` in a child's `agent_message`. Before delivering a completed collaboration call, the gateway records SHA-256 hashes of its plain-text message arguments in the existing SQLite database (`COPILOT_API_SQLITE_DB_PATH`, or `copilot-api.sqlite` in the data directory). When a subsequent agent message matches one of these hashes, the gateway changes that content part to `input_text` and preserves the exact string. It does not guess from the appearance of the text and does not store message bodies in this table.
 
-Preserve this SQLite metadata along with the gateway's data when restarting or migrating it. Sessions must return to an instance with the metadata, or use a shared data store. Enable the mode for each model used by the affected parent and child threads. Storage is initialized before starting a request that can emit compatibility tool calls, and hashes are persisted before completed arguments/calls are delivered to the client.
+Preserve this SQLite metadata along with the gateway's data when restarting or migrating it. Sessions must return to an instance with the relevant metadata; this implementation does not add a distributed data store. Enable the mode for each model used by the affected parent and child threads. Storage is initialized before starting a request that can emit compatibility tool calls, and hashes are persisted before completed arguments/calls are delivered to the client.
 
 This does not decrypt existing conversation content. Opaque history is retained unchanged; a session or child thread with unreadable encrypted messages may still require explicit recovery. Do not treat a successful replay as proof that an old encrypted message has been recovered.
 
@@ -30,7 +30,13 @@ Copilot can announce a stream, send `response.failed` with no error details, the
 
 For opted-in models, the gateway inspects an initial prefix before committing HTTP streaming headers. An early explicit invalid-request error is returned as HTTP 400 with its original code, message, and parameter. Usage present in the consumed failed event is still recorded.
 
-The prefix is bounded to 16 events, 256 KiB, and two seconds. Waiting for a trailing error after an empty failure is limited to 250 milliseconds within that deadline. The first event with model output ends inspection immediately. Successful output is not buffered to completion, and an outstanding read is preserved if the deadline expires. Failures after output starts, other error classifications, and failures outside the inspected prefix retain the existing streaming behavior. This mode adds no retries and deletes no history.
+Inspection has a 16-event limit, a two-second deadline, and a 256 KiB buffer threshold checked between received events. The threshold is not a hard cap on an individual incoming chunk. Waiting for a trailing error after an empty failure is limited to 250 milliseconds within the overall deadline. The first event with model output ends inspection immediately. Successful output is not buffered to completion, and an outstanding read is preserved if the deadline expires. Failures after output starts, other error classifications, and failures outside the inspected prefix retain the existing streaming behavior. This mode adds no retries and deletes no history.
+
+## Backward compatibility and known issues
+
+The default empty allowlist preserves existing workflows. No known regressions were found in the recorded regression tests, CI, and live checks. This does not imply that pre-existing upstream encryption failures are fixed for every provider, model, or history.
+
+Automatic approval review has not been validated by the recorded live checks. If a separately mapped review model consumes compatibility-generated agent messages, its resolved Copilot model ID also needs the mode enabled. Unknown ciphertext, account/provider encryption boundaries, and recovery of old encrypted instructions remain outside this patch.
 
 ## Validation before enabling
 

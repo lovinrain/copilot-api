@@ -1,5 +1,7 @@
 # Copilot API
 
+**Codex compatibility fork:** Use the maintained `codex-compat` branch for the Copilot subagent/resume patch. See [fork installation and maintenance](FORK_MAINTENANCE.md) for source builds, opt-in configuration, CI, and the deployed v2.6.20 backport. The npm quick start below installs the upstream release.
+
 <p align="center">
   <img src="docs/hero/copilot-api-hero.svg" alt="Copilot API - Universal AI Gateway" width="1600" />
 </p>
